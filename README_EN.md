@@ -158,23 +158,21 @@ The Web version provides the following RESTful APIs:
 
 Use PyInstaller to build into a single-file executable:
 
+***install`PyInstaller`:***
+```bash
+pip install pyInstaller
+```
+
 **Desktop:**
 
 ```bash
-pyinstaller --clean --onefile -w -i ".\Banchen123.ico" ^
-  --exclude-module numpy --exclude-module matplotlib ^
-  --exclude-module IPython --exclude-module pandas ^
-  ".\main.py"
+pyinstaller --clean --onefile -w -i ".\Banchen123.ico" --exclude-module numpy --exclude-module matplotlib  --exclude-module IPython --exclude-module pandas  ".\main.py"
 ```
 
 **Web:**
 
 ```bash
-pyinstaller --clean --onefile -w -i ".\Banchen123.ico" ^
-  --uac-admin ^
-  --add-data ".\web_branch\templates;templates" ^
-  --exclude-module numpy --exclude-module matplotlib ^
-  ".\web_branch\app.py"
+pyinstaller --clean --onefile -w -i ".\Banchen123.ico" --uac-admin --add-data ".\web_branch\templates;templates"  --exclude-module numpy --exclude-module matplotlib  ".\web_branch\app.py"
 ```
 
 ---

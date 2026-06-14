@@ -161,23 +161,21 @@ Web 端提供以下 RESTful API：
 
 使用 PyInstaller 打包为单文件可执行程序：
 
+***安装`PyInstaller`:***
+```bash
+pip install pyInstaller
+```
+
 **桌面端：**
 
 ```bash
-pyinstaller --clean --onefile -w -i ".\Banchen123.ico" ^
-  --exclude-module numpy --exclude-module matplotlib ^
-  --exclude-module IPython --exclude-module pandas ^
-  ".\main.py"
+pyinstaller --clean --onefile -w -i ".\Banchen123.ico" --exclude-module numpy --exclude-module matplotlib  --exclude-module IPython --exclude-module pandas  ".\main.py"
 ```
 
 **Web 端：**
 
 ```bash
-pyinstaller --clean --onefile -w -i ".\Banchen123.ico" ^
-  --uac-admin ^
-  --add-data ".\web_branch\templates;templates" ^
-  --exclude-module numpy --exclude-module matplotlib ^
-  ".\web_branch\app.py"
+pyinstaller --clean --onefile -w -i ".\Banchen123.ico" --uac-admin --add-data ".\web_branch\templates;templates"  --exclude-module numpy --exclude-module matplotlib  ".\web_branch\app.py"
 ```
 
 ---
