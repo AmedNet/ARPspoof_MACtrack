@@ -4,7 +4,7 @@ import threading
 import winreg
 
 import customtkinter as ctk
-from scapy.all import conf, srp, Ether, ARP
+from scapy.all import conf, srp, Ether, ARP, get_if_list
 
 # 视觉风格配置
 ctk.set_appearance_mode("Dark")

@@ -1,7 +1,6 @@
 import sys
 import threading
 import time
-from tkinter import messagebox
 
 import customtkinter as ctk
 from scapy.all import ARP, Ether, srp, sendp, conf, get_if_addr, get_if_list, get_if_hwaddr
@@ -304,12 +303,14 @@ class ProSpooferV3(ctk.CTk):
                                      timeout=2, iface=iface, verbose=False, retry=1)
 
                 gw_mac = None
+                gw_ip_found = False
                 for _, rcv in ans:
                     if rcv.psrc == gw_ip:
                         gw_mac = rcv.hwsrc
+                        gw_ip_found = True
                         break
 
-                if not gw_mac:
+                if not gw_ip_found:
                     ans_gw, _ = srp(Ether(dst="ff:ff:ff:ff:ff:ff") / ARP(pdst=gw_ip),
                                     timeout=2, iface=iface, verbose=False, retry=1)
                     gw_mac = ans_gw[0][1].hwsrc if ans_gw else None
@@ -421,6 +422,9 @@ class ProSpooferV3(ctk.CTk):
         loop = 0
 
         mac_to_ip = {mac: ip for mac, ip in targets}
+
+        # 等待 scan_network 设置 gateway_mac
+        time.sleep(0.5)
 
         while self.is_running:
             try:

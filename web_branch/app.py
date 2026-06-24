@@ -194,7 +194,7 @@ def index():
 
 @app.route('/api/scan', methods=['POST'])
 def scan():
-    state["gateway_ip"] = request.json.get('gateway_ip')
+    state["gateway_ip"] = request.json.get('gateway_ip') or ""
     state["whitelist"] = request.json.get('whitelist', [])
     wl_ips = state["whitelist"] + [state["gateway_ip"], state["local_ip"]]
 

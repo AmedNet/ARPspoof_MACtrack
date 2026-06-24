@@ -1,7 +1,7 @@
 import os
 import threading
 import customtkinter as ctk
-from scapy.all import conf, srp, Ether, ARP
+from scapy.all import conf, srp, Ether, ARP, get_if_list
 import winreg
 import ctypes
 
@@ -96,7 +96,13 @@ class ModernCompactApp(ctk.CTk):
             # 1. 获取基础信息
             active_iface = conf.iface
             self.gw_ip = conf.route.route("0.0.0.0")[2]
-            self.idx = active_iface.index
+            if hasattr(active_iface, 'index'):
+                self.idx = active_iface.index
+            elif isinstance(active_iface, str):
+                ifaces = get_if_list()
+                self.idx = ifaces.index(str(active_iface))
+            else:
+                self.idx = active_iface
             self.log(f"> 网卡Idx: {self.idx}")
 
             # 2. 探测 MAC
@@ -123,7 +129,13 @@ class ModernCompactApp(ctk.CTk):
         try:
             if not self.idx:
                 self.gw_ip = conf.route.route("0.0.0.0")[2]
-                self.idx = conf.iface.index
+                if hasattr(conf.iface, 'index'):
+                    self.idx = conf.iface.index
+                elif isinstance(conf.iface, str):
+                    ifaces = get_if_list()
+                    self.idx = ifaces.index(str(conf.iface))
+                else:
+                    self.idx = conf.iface
 
             cmd = f'netsh interface ipv4 delete neighbors {self.idx} {self.gw_ip}'
             if os.system(cmd) == 0:
